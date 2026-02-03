@@ -24,4 +24,4 @@ hs_err_pid*
 replay_pid*
 
 # Third-party files
-ffmpeg-8.0.1-essentials_build/
+ffmpeg*/

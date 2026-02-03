@@ -1,0 +1,384 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Morse Voice Trainer</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 20px; line-height: 1.35; }
+    .row { margin: 10px 0; }
+    label { display: inline-block; width: 140px; }
+    input[type="text"] { width: 320px; padding: 6px; }
+    input[type="number"] { width: 100px; padding: 6px; }
+    button { padding: 8px 12px; margin-right: 8px; }
+    pre { background: #f4f4f4; padding: 10px; border-radius: 8px; }
+  </style>
+</head>
+
+<body>
+  <h1>Morse Voice Trainer -- TEST BUILD</h1>
+
+  <div class="row">
+    <label for="text">Text to play</label>
+    <input id="text" type="text" value="BK DE KG7GDS" />
+  </div>
+
+  <div class="row">
+    <label for="wpm">WPM</label>
+    <input id="wpm" type="number" min="5" max="60" value="18" />
+    <span style="margin-left:10px;color:#555">character speed</span>
+  </div>
+
+  <div class="row">
+    <label for="freq">Tone (Hz)</label>
+    <input id="freq" type="number" min="300" max="1000" value="600" />
+  </div>
+
+  <div class="row">
+    <button id="btnInit">Enable Audio</button>
+    <button id="btnPlay">Play</button>
+    <button id="btnStop">Stop</button>
+  </div>
+  <!-- Add new row of audio buttons -->
+  <div class="row">
+    <button id="btnMic">Enable Mic</button>
+    <button id="btnRec">Start Recording</button>
+    <button id="btnStopRec">Stop & Upload</button>
+    <button id="btnPlayRec">Play Last Recording</button>
+  </div>
+
+  <!-- Add a new transcribe button-->
+   <div class="row">
+    <button id="btnTranscribe">Transcribe</button>
+   </div>
+
+  <div class="row">
+    <pre id="log"></pre>
+  </div>
+
+<script>
+(() => {
+  const logEl = document.getElementById('log');
+  const textEl = document.getElementById('text');
+  const wpmEl  = document.getElementById('wpm');
+  const freqEl = document.getElementById('freq');
+
+  // Add recording code inside IIFE:
+  let mediaStream = null;
+  let mediaRecorder = null;
+  let recordedChunks = [];
+  let lastBlob = null;
+  let lastObjectUrl = null;
+
+
+  function pickMimeType() {
+    // Browser support varies. Try best-first.
+    const candidates = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/mp4",           // sometimes on iOS
+      "audio/aac",
+      "audio/wav"            // rarely supported by MediaRecorder, but harmless to try
+    ];
+    for (const mt of candidates) {
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(mt)) {
+        return mt;
+      }
+    }
+    return ""; // let browser choose
+  }
+
+  async function enableMic() {
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
+    });
+    log("Mic enabled.");
+  }
+
+  function startRecording() {
+    if (!mediaStream) {
+      log("Enable Mic first.");
+      return;
+    }
+
+    recordedChunks = [];
+    const mt = pickMimeType();
+    mediaRecorder = mt
+      ? new MediaRecorder(mediaStream, { mimeType: mt })
+      : new MediaRecorder(mediaStream);
+
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) recordedChunks.push(e.data);
+    };
+
+    mediaRecorder.start();
+    log("Recording...");
+  }
+
+
+  async function stopAndUpload() {
+  if (!mediaRecorder) {
+    log("Not recording.");
+    return;
+  }
+
+  await new Promise((resolve) => {
+    mediaRecorder.onstop = () => {
+      lastBlob = new Blob(
+        recordedChunks,
+        { type: mediaRecorder.mimeType || "application/octet-stream" }
+      );
+      log(`Recorded ${lastBlob.size} bytes (${lastBlob.type || "unknown type"}).`);
+      resolve();
+    };
+    mediaRecorder.stop();
+  });
+
+  log(`Uploading ${lastBlob.size} bytes (${lastBlob.type || "unknown type"})...`);
+
+  const resp = await fetch("/upload-audio", {
+    method: "POST",
+    headers: { "Content-Type": lastBlob.type || "application/octet-stream" },
+    body: lastBlob
+  });
+
+  const txt = await resp.text();
+  log("Server response:\n" + txt);
+}
+
+  // End of recording code ^
+
+  // Add function to replay last recording
+function playLastRecording() {
+  if (!lastBlob) {
+    log("No recording yet.");
+    return;
+  }
+  if (lastObjectUrl) URL.revokeObjectURL(lastObjectUrl);
+  lastObjectUrl = URL.createObjectURL(lastBlob);
+
+  const audio = new Audio(lastObjectUrl);
+  audio.onended = () => {
+    // keep URL around for reuse; optional revoke later
+  };
+  audio.play().catch(e => log("Playback error: " + e));
+  log("Playing last recording...");
+}
+  // End of function to replay last recording ^
+
+  // Add a new transcribe function
+async function transcribeLast() {
+  if (!lastBlob) {
+    log("No recording yet.");
+    return;
+  }
+
+  log(`Transcribing ${lastBlob.size} bytes (${lastBlob.type || "unknown type"})...`);
+
+  const resp = await fetch("/transcribe", {
+    method: "POST",
+    headers: { "Content-Type": lastBlob.type || "application/octet-stream" },
+    body: lastBlob
+  });
+
+  const text = await resp.text();
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch (e) {
+    log("Transcribe: server returned non-JSON:\n" + text);
+    return;
+  }
+
+  if (!json.ok) {
+    log("Transcribe error: " + (json.error || "unknown") + "\n" + (json.detail || ""));
+    return;
+  }
+
+  // Expected shape: {"ok":true,"vosk":{...}}
+  const heard = (json.vosk && json.vosk.text) ? json.vosk.text : "(no text)";
+  log("Heard: " + heard);
+}
+
+
+  // End of new transcribe function ^
+
+  let audioCtx = null;
+  let stopRequested = false;
+
+  // International Morse (basic set; we can extend anytime)
+  const MORSE = {
+    "A": ".-",    "B": "-...",  "C": "-.-.",  "D": "-..",   "E": ".",
+    "F": "..-.",  "G": "--.",   "H": "....",  "I": "..",    "J": ".---",
+    "K": "-.-",   "L": ".-..",  "M": "--",    "N": "-.",    "O": "---",
+    "P": ".--.",  "Q": "--.-",  "R": ".-.",   "S": "...",   "T": "-",
+    "U": "..-",   "V": "...-",  "W": ".--",   "X": "-..-",  "Y": "-.--",
+    "Z": "--..",
+    "0": "-----", "1": ".----", "2": "..---", "3": "...--", "4": "....-",
+    "5": ".....", "6": "-....", "7": "--...", "8": "---..", "9": "----.",
+    ".": ".-.-.-", ",": "--..--", "?": "..--..", "/": "-..-.",
+    "=": "-...-",  "+": ".-.-.",  "-": "-....-",  "(": "-.--.", ")": "-.--.-",
+    ":": "---...",  ";": "-.-.-.", "'": ".----.", "\"": ".-..-.",
+    "@": ".--.-.", "!": "-.-.--",
+    " ": " " // word gap handled specially
+  };
+
+  function log(msg) {
+    logEl.textContent = msg;
+  }
+
+  function ensureAudio() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') return audioCtx.resume();
+    return Promise.resolve();
+  }
+
+  // Timing: "dit" length in seconds (PARIS standard): dit = 1.2 / WPM
+  function ditSeconds(wpm) {
+    return 1.2 / wpm;
+  }
+
+  // Smooth envelope to avoid clicks: short attack/release
+  function scheduleTone(startTime, duration, freqHz) {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(freqHz, startTime);
+
+    // Envelope
+    const attack = 0.005;   // 5ms
+    const release = 0.010;  // 10ms
+    const peak = 0.4;
+
+    gain.gain.setValueAtTime(0.0, startTime);
+    gain.gain.linearRampToValueAtTime(peak, startTime + attack);
+
+    const sustainEnd = Math.max(startTime + attack, startTime + duration - release);
+    gain.gain.setValueAtTime(peak, sustainEnd);
+    gain.gain.linearRampToValueAtTime(0.0, startTime + duration);
+
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+
+    osc.start(startTime);
+    osc.stop(startTime + duration + 0.02); // tiny padding
+  }
+
+  async function playMorse(text, wpm, freqHz) {
+    stopRequested = false;
+    await ensureAudio();
+
+    // Normalize text
+    const s = (text || "").toUpperCase();
+
+    const dit = ditSeconds(wpm);
+    const dah = 3 * dit;
+
+    // Standard gaps:
+    // intra-element gap = 1 dit (between dits/dahs within a character)
+    // inter-character gap = 3 dits (between characters) but note: includes the 1-dit intra gap already if you implement carefully
+    // inter-word gap = 7 dits
+    const intra = dit;
+    const interChar = 3 * dit;
+    const interWord = 7 * dit;
+
+    let t = audioCtx.currentTime + 0.05; // slight lead-in
+
+    let played = "";
+    for (let i = 0; i < s.length; i++) {
+      if (stopRequested) break;
+
+      const ch = s[i];
+      const code = MORSE[ch];
+      if (code === undefined) {
+        // Unknown: treat as a word gap
+        t += interWord;
+        continue;
+      }
+
+      if (ch === " ") {
+        // Word gap
+        t += interWord;
+        played += " / ";
+        continue;
+      }
+
+      played += ch + " ";
+
+      // Elements within the character
+      for (let j = 0; j < code.length; j++) {
+        if (stopRequested) break;
+
+        const sym = code[j];
+        if (sym === ".") {
+          scheduleTone(t, dit, freqHz);
+          t += dit;
+        } else if (sym === "-") {
+          scheduleTone(t, dah, freqHz);
+          t += dah;
+        }
+
+        // Intra-element gap after each element EXCEPT the last one
+        if (j < code.length - 1) t += intra;
+      }
+
+      // Character gap after each character (but if next is space, we'll let the space handler do the big gap)
+      // We need total gap between characters = 3 dits.
+      // At this point we've already ended tone exactly at time t; so add interChar.
+      // BUT if next char is a space, do nothing here (space handler adds 7).
+      if (i < s.length - 1 && s[i+1] !== " ") t += interChar;
+    }
+
+    log("Played: " + played.trim());
+  }
+
+  document.getElementById('btnInit').onclick = async () => {
+    await ensureAudio();
+    log("Audio enabled.");
+  };
+
+  document.getElementById('btnPlay').onclick = () => {
+    const text = textEl.value;
+    const wpm = parseFloat(wpmEl.value) || 18;
+    const freq = parseFloat(freqEl.value) || 600;
+    playMorse(text, wpm, freq).catch(e => log("Error: " + e));
+  };
+
+  document.getElementById('btnStop').onclick = () => {
+    stopRequested = true;
+    log("Stopped.");
+  };
+
+  // Wire up audio buttons
+  document.getElementById('btnMic').onclick = async () => {
+    try {
+      await enableMic();
+    } catch (e) {
+      log("Mic error: " + e);
+    }
+  };
+
+  document.getElementById('btnRec').onclick = () => {
+    startRecording();
+  };
+
+  document.getElementById('btnStopRec').onclick = () => {
+    stopAndUpload().catch(e => log("Upload error: " + e));
+  };
+
+  document.getElementById('btnPlayRec').onclick = () => playLastRecording();
+
+  document.getElementById("btnTranscribe").onclick = transcribeLast;
+
+  // End wiring up of audio buttons ^
+
+  log("Click 'Enable Audio' first (browser requirement).");
+})();
+</script>
+</body>
+</html>

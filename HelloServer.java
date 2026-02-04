@@ -269,6 +269,11 @@ public class HelloServer {
 
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            System.out.println("cwd=" + System.getProperty("user.dir"));
+            Path p = Paths.get("index.html").toAbsolutePath().normalize();
+            System.out.println("index.html exists? " + Files.exists(p) + " path=" + p);
+
+
             System.out.println("HIT StaticIndexHandler uri=" + exchange.getRequestURI()
                     + " method=" + exchange.getRequestMethod()
                     + " context=" + exchange.getHttpContext().getPath());
@@ -277,7 +282,15 @@ public class HelloServer {
             exchange.getResponseHeaders().set("X-Handler", "static-index");
             exchange.getResponseHeaders().set("Content-Type", "text/html; charset=utf-8");
             exchange.getResponseHeaders().set("X-Diag", "static-index-YES");
-            byte[] body = fallbackPageBytes();
+            
+            byte[] body;
+            if (Files.exists(p)) {
+                body = Files.readAllBytes(p);
+            } else {
+                body = fallbackPageBytes();
+            }
+
+
 
             exchange.sendResponseHeaders(200, body.length);
             try (OutputStream os = exchange.getResponseBody()) {
